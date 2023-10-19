@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template for deploying Bedrock based chatbot resources: Amazon Bedrock, Amazon Lex, Amazon Kendra, S3 bucket and corresponding IAM roles"
+Parameters:
+  LambdaImage:
+    Description: 'The Lambda container image to use in the stack'
+    Type: String
+Resources:
+  KendraIndex:
+    Type: "AWS::Kendra::Index"
+    Properties:
+      Name: "KendraChatbotIndex"
+      RoleArn: !GetAtt KendraRole.Arn
+      Edition: "DEVELOPER_EDITION"
+  KendraDataSource:
+    Type: AWS::Kendra::DataSource
+    Properties: 
+      DataSourceConfiguration: 
+        S3Configuration: 
+          BucketName: !Ref WebDataS3Bucket
+      IndexId: !Ref KendraIndex
+      Name: "KendraChatbotIndexDataSource"
+      RoleArn: !GetAtt KendraRole.Arn
+      Type: "S3"
+  WebDataS3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      AccessControl: "Private"
+  KendraRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "KendraChatbotRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "kendra.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: kendra-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: "Allow"
+              Action: 
+                - "kendra:BatchPutDocument"
+                - "kendra:BatchDeleteDocument"
+              Resource: "*"
+            - Effect: "Allow"
+              Action: 
+                - "s3:GetObject"
+              Resource: !Join 
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref WebDataS3Bucket
+                  - /*
+            - Effect: "Allow"
+              Action: 
+                - "s3:ListBucket"
+              Resource: !GetAtt WebDataS3Bucket.Arn
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+  OrchestratorRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "OrchestratorChatbotRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: lambda-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'kendra:Retrieve'
+                  - 'kendra:Query'
+                Resource: !GetAtt KendraIndex.Arn
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  OrchestratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      PackageType: Image
+      Role: !GetAtt OrchestratorRole.Arn
+      FunctionName: "ChatbotOrchestratorFunction"
+      MemorySize: 1024
+      Timeout: 120
+      Code:
+        ImageUri: !Ref LambdaImage
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          kendra_index_id: !Ref KendraIndex
+          aws_region: !Ref 'AWS::Region'
+  BotRuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lexv2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: "/" 
+      Policies:
+        - PolicyName: LexRuntimeRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "polly:SynthesizeSpeech"
+                  - "comprehend:DetectSentiment"
+                Resource: "*"
+  LambdaPermissionInvokeFromLex:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !GetAtt OrchestratorFunction.Arn
+        Action: lambda:InvokeFunction
+        Principal: lexv2.amazonaws.com  
+  Chatbot:
+    DependsOn: BotRuntimeRole
+    Type: AWS::Lex::Bot
+    Properties:
+      Name: "Chatbot"
+      RoleArn: !GetAtt BotRuntimeRole.Arn
+      DataPrivacy:
+        ChildDirected: false
+      IdleSessionTTLInSeconds: 300
+      Description: "LLM Bot"
+      AutoBuildBotLocales: false
+      BotLocales:
+        - LocaleId: "en_US"
+          Description: "Password Reset for LLM"
+          NluConfidenceThreshold: 0.40
+          VoiceSettings:
+            VoiceId: "Ivy"
+          SlotTypes:
+            - Name: "AccountID"
+              Description: "Slot Type description"
+              SlotTypeValues:
+                - SampleValue:
+                    Value: 012345678901
+              ValueSelectionSetting:
+                ResolutionStrategy: ORIGINAL_VALUE
+          Intents:
+            - Name: "PasswordReset"
+              Description: "Intent to reset password"
+              SampleUtterances:
+                - Utterance: "reset password"
+                - Utterance: "forgot my password"
+              IntentConfirmationSetting:
+                PromptSpecification:
+                  MessageGroupsList:
+                    - Message:
+                        PlainTextMessage:
+                          Value: "I have sent a password reset email. Anything else I can help with?"
+                  MaxRetries: 0
+                  AllowInterrupt: false
+                DeclinationResponse:
+                  MessageGroupsList:
+                    - Message:
+                        PlainTextMessage:
+                          Value: "Okay, I will not send a password reset email."
+                  AllowInterrupt: false
+              SlotPriorities:
+              - Priority: 1
+                SlotName: AccountEmail
+              Slots:
+                - Name: "AccountEmail"
+                  Description: "something"
+                  SlotTypeName: "AMAZON.EmailAddress"
+                  ValueElicitationSetting:
+                    SlotConstraint: "Required"
+                    PromptSpecification:
+                      MessageGroupsList:
+                        - Message:
+                            PlainTextMessage:
+                              Value: "I can help with that, what's your email?"
+                      MaxRetries: 0
+                      AllowInterrupt: false
+            - Name: "FallbackIntent"
+              Description: "Invoke Lambda when FallbackIntent gets hit"
+              ParentIntentSignature: "AMAZON.FallbackIntent"
+              FulfillmentCodeHook:
+                  Enabled: true
+                  IsActive: true
+            - Name: "Goodbye"
+              Description: "Terminate Conversation"
+              SampleUtterances:
+                - Utterance: "No more questions"
+                - Utterance: "Goodbye"
+              IntentConfirmationSetting:
+                PromptSpecification:
+                  MessageGroupsList:
+                    - Message:
+                        PlainTextMessage:
+                          Value: "Goodbye"
+                  MaxRetries: 0
+                  AllowInterrupt: false
+  ChatbotVersion1:
+    DependsOn: Chatbot
+    Type: AWS::Lex::BotVersion
+    Properties:
+      BotId: !Ref Chatbot
+      BotVersionLocaleSpecification:
+        - LocaleId: en_US
+          BotVersionLocaleDetails:
+            SourceBotVersion: DRAFT
+      Description: Chatbot Version.
+  BotAlias:
+    DependsOn: ChatbotVersion1
+    Type: AWS::Lex::BotAlias
+    Properties:
+      BotId: !Ref Chatbot
+      BotAliasName: "ChatbotTestAlias"
+      BotAliasLocaleSettings: 
+        - LocaleId: en_US
+          BotAliasLocaleSetting:
+            Enabled: true
+            CodeHookSpecification:
+              LambdaCodeHook:
+                CodeHookInterfaceVersion: "1.0"
+                LambdaArn: !GetAtt OrchestratorFunction.Arn
+      BotVersion: !GetAtt ChatbotVersion1.BotVersion
+      SentimentAnalysisSettings:
+        DetectSentiment: true
+Outputs:
+  BotAlias:
+    Value: !Ref BotAlias
+    Export:
+      Name: "BotAlias"
+  BotAliasId:
+    Value: !GetAtt BotAlias.BotAliasId
+    Export:
+      Name: "BotAliasId"
+  ChatbotId:
+    Value: !Ref Chatbot
+    Export:
+      Name: "Chatbot"
