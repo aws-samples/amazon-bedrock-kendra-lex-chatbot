@@ -11,20 +11,22 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.llms.bedrock import Bedrock
 from langchain.prompts import PromptTemplate
 
+REGION_NAME = os.environ['aws_region']
+
 retriever = AmazonKendraRetriever(
     index_id=os.environ['kendra_index_id'],
-    region_name=os.environ['aws_region']
+    region_name=REGION_NAME
 )
 
 llm_jurassic_ultra = Bedrock(
     model_id="ai21.j2-ultra-v1",
-    endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+    endpoint_url="https://bedrock-runtime." + REGION_NAME + ".amazonaws.com",
     model_kwargs={"temperature": 0.7, "maxTokens": 500, "numResults": 1}
 )
 
 llm_jurassic_mid = Bedrock(
     model_id="ai21.j2-mid-v1",
-    endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+    endpoint_url="https://bedrock-runtime." + REGION_NAME + ".amazonaws.com",
     model_kwargs={"temperature": 0.7, "maxTokens": 300, "numResults": 1}
 )
 
