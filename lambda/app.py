@@ -13,56 +13,71 @@ from langchain.prompts import PromptTemplate
 
 REGION_NAME = os.environ['aws_region']
 
+MODEL_TYPE = "CLAUDE"
+
 retriever = AmazonKendraRetriever(
     index_id=os.environ['kendra_index_id'],
     region_name=REGION_NAME
 )
 
-llm_jurassic_ultra = Bedrock(
-    model_id="ai21.j2-ultra-v1",
-    endpoint_url="https://bedrock-runtime." + REGION_NAME + ".amazonaws.com",
-    model_kwargs={"temperature": 0.7, "maxTokens": 500, "numResults": 1}
-)
+if(MODEL_TYPE == "CLAUDE"):
+    llm = Bedrock(
+        model_id="anthropic.claude-v2:1",
+        endpoint_url="https://bedrock-runtime." + REGION_NAME + ".amazonaws.com",
+        model_kwargs={"temperature": 0.7, "max_tokens_to_sample": 500}
+    )
 
-llm_jurassic_mid = Bedrock(
-    model_id="ai21.j2-mid-v1",
-    endpoint_url="https://bedrock-runtime." + REGION_NAME + ".amazonaws.com",
-    model_kwargs={"temperature": 0.7, "maxTokens": 300, "numResults": 1}
-)
+    condense_question_llm = Bedrock(
+        model_id="anthropic.claude-instant-v1",
+        endpoint_url="https://bedrock-runtime." + REGION_NAME + ".amazonaws.com",
+        model_kwargs={"temperature": 0.7, "max_tokens_to_sample": 300}
+    )
+else:
+    llm = Bedrock(
+        model_id="ai21.j2-ultra-v1",
+        endpoint_url="https://bedrock-runtime." + REGION_NAME + ".amazonaws.com",
+        model_kwargs={"temperature": 0.7, "maxTokens": 500, "numResults": 1}
+    )
+
+    condense_question_llm = Bedrock(
+        model_id="ai21.j2-mid-v1",
+        endpoint_url="https://bedrock-runtime." + REGION_NAME + ".amazonaws.com",
+        model_kwargs={"temperature": 0.7, "maxTokens": 300, "numResults": 1}
+    )
 
 #Create template for combining chat history and follow up question into a standalone question.
 question_generator_chain_template = """
-Here is some chat history contained in the <chat_history> tags and a follow-up question in the <follow_up> tags:
+Human: Here is some chat history contained in the <chat_history> tags. If relevant, add context from the Human's previous questions to the new question. Return only the question. No preamble. If unsure, ask the Human to clarify. Think step by step.
+
+Assistant: Ok
 
 <chat_history>
 {chat_history}
+
+Human: {question}
 </chat_history>
 
-<follow_up>
-{question}
-</follow_up>
-
-Combine the chat history and follow up question into a standalone question.
+Assistant:
 """
 
 question_generator_chain_prompt = PromptTemplate.from_template(question_generator_chain_template)
 
 #Create template for asking the question of the given context.
 combine_docs_chain_template = """
-You are a friendly, concise chatbot. Here is some context, contained in <context> tags:
+Human: You are a friendly, concise chatbot. Here is some context, contained in <context> tags. Answer this question as concisely as possible with no tags. Say I don't know if the answer isn't given in the context: {question}
 
 <context>
 {context}
 </context>
 
-Given the context answer this question: {question}
+Assistant:
 """
 combine_docs_chain_prompt = PromptTemplate.from_template(combine_docs_chain_template)
 
 # RetrievalQA instance with custom prompt template
 qa = ConversationalRetrievalChain.from_llm(
-    llm=llm_jurassic_ultra,
-    condense_question_llm=llm_jurassic_mid,
+    llm=llm,
+    condense_question_llm=condense_question_llm,
     retriever=retriever,
     return_source_documents=True,
     condense_question_prompt=question_generator_chain_prompt,
@@ -119,7 +134,8 @@ def lambda_handler(event, context):
             response_text = "I don't know"
 
         # Append user input and response to chat history. Then only retain last 3 message histories.
-        chat_history.append((f"Human: {user_input}", f"Assistant: {response_text}"))
+        # It seemed to work better with AI responses removed, but try adding them back in. {response_text}
+        chat_history.append((f"{user_input}", f"..."))
         chat_history = chat_history[-3:]
 
         return lex_format_response(event, response_text, json.dumps(chat_history))
